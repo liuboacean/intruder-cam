@@ -24,6 +24,7 @@ import fcntl
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -200,10 +201,75 @@ def take_photo(reason: str) -> str | None:
 
 # ========== 核心监控 ==========
 
+class DisplayWatcher:
+    """轮询 pmset -g assertions 检测显示器状态变化
+
+    InternalPreventDisplaySleep:
+      1 = 显示器亮着（有人在使用）
+      0 = 显示器可以休眠（合盖/超时）
+    检测 0→1 转变 = 显示器唤醒事件
+    """
+
+    def __init__(self, on_wake_cb):
+        self.on_wake_cb = on_wake_cb
+        self.last_state = None
+        self._running = True
+
+    def start(self):
+        t = threading.Thread(target=self._poll, daemon=True)
+        t.start()
+
+    def stop(self):
+        self._running = False
+
+    def _poll(self):
+        # 先获取初始状态
+        self.last_state = self._check_state()
+        time.sleep(1)
+
+        while self._running:
+            try:
+                new_state = self._check_state()
+                if new_state is not None and self.last_state is not None:
+                    # 0 → 1：显示器刚刚唤醒（合盖开/按键唤醒）
+                    if self.last_state == 0 and new_state == 1:
+                        log("🔍 显示器唤醒（显示状态从休眠转为亮起）")
+                        self.on_wake_cb()
+
+                self.last_state = new_state if new_state is not None else self.last_state
+            except Exception as e:
+                log(f"⚠️ 显示状态检测异常: {e}")
+
+            time.sleep(2)
+
+    def _check_state(self) -> int | None:
+        """检查 InternalPreventDisplaySleep 状态"""
+        try:
+            result = subprocess.run(
+                ["pmset", "-g", "assertions"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if "InternalPreventDisplaySleep" in line:
+                    val = line.split()[-1].strip()
+                    return int(val)
+            return None
+        except Exception:
+            return None
+
+
 class IntruderMonitor:
     def __init__(self):
         self.last_wake_time = 0.0
         self.last_hid_time = 0.0
+
+    def on_display_wake(self):
+        """显示器从休眠唤醒时的回调"""
+        now = time.time()
+        if now - self.last_wake_time >= COOLDOWN_WAKE:
+            self.last_wake_time = now
+            take_photo("显示器唤醒")
 
     def run(self):
         log("=" * 50)
@@ -215,20 +281,23 @@ class IntruderMonitor:
         # 启动测试照
         take_photo("启动测试")
 
+        # 启动显示器状态轮询（每 2 秒检测）
+        watcher = DisplayWatcher(on_wake_cb=self.on_display_wake)
+        watcher.start()
+        log("👂 显示器状态轮询已启动")
+
         # 跳过 log stream 启动输出
         time.sleep(3)
 
-        predicate = (
-            '(process == "powerd" AND eventMessage contains[c] "Cancelling notification display wake")'
-            ' OR (process == "powerd" AND eventMessage contains[c] "hidActive:1")'
-        )
+        # HID 活动监听（只用键盘/鼠标事件，不再监听 powerd wake 误报）
+        predicate = '(process == "powerd" AND eventMessage contains[c] "hidActive:1")'
 
         proc = subprocess.Popen(
             ["log", "stream", "--predicate", predicate, "--style", "compact", "--info"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,
         )
-        log("👂 监听中... 去锁屏试试吧！")
+        log("👂 HID 活动监听已启动")
 
         try:
             for line in proc.stdout:
@@ -237,15 +306,7 @@ class IntruderMonitor:
                     continue
 
                 now = time.time()
-
-                if "Cancelling notification display wake" in line:
-                    if now - self.last_wake_time >= COOLDOWN_WAKE:
-                        self.last_wake_time = now
-                        log("🔍 显示器唤醒!")
-                        take_photo("显示器唤醒")
-                    # 冷却内不记录日志（静默跳过）
-
-                elif "hidActive:1" in line:
+                if "hidActive:1" in line:
                     if now - self.last_hid_time >= COOLDOWN_HID:
                         self.last_hid_time = now
                         log("🔍 检测到键盘/鼠标活动")
@@ -255,6 +316,8 @@ class IntruderMonitor:
             log("🛑 用户中断")
         except Exception as e:
             log(f"❌ 监控异常: {e}")
+        finally:
+            watcher.stop()
 
 
 # ========== 登录项管理（替代 LaunchAgent，摄像头权限正常） ==========
