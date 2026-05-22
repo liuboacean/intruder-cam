@@ -65,10 +65,11 @@ python3 intruder_cam.py --uninstall
 
 ## 技术细节
 
-- 通过 `log stream` 实时监听 `powerd` 系统日志
-- 使用 `ffmpeg` + AVFoundation 调用摄像头（1280×720）
-- 拍照后通过 AppleScript 导入系统相册
-- 文件锁防止 ffmpeg 并发冲突
+- 通过 `log stream` 实时监听 HID（键盘/鼠标）活动  
+- 通过 `pmset -g assertions` 每 2 秒轮询显示器休眠状态，检测唤醒  
+- 使用 `ffmpeg` + AVFoundation 调用摄像头（1280×720）  
+- 拍照后通过 AppleScript 导入系统相册  
+- 文件锁防止 ffmpeg 并发冲突  
 - 唤醒冷却 20s / 键盘冷却 15s，防重复触发
 
 ## 为什么不用 LaunchAgent？
