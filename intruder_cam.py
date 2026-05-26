@@ -22,6 +22,7 @@ Intruder Cam v3 — Mac 防盗拍监控（稳定版）
 
 import fcntl
 import os
+import select
 import subprocess
 import sys
 import threading
@@ -263,6 +264,7 @@ class IntruderMonitor:
     def __init__(self):
         self.last_wake_time = 0.0
         self.last_hid_time = 0.0
+        self._running = True
 
     def on_display_wake(self):
         """显示器从休眠唤醒时的回调"""
@@ -289,35 +291,70 @@ class IntruderMonitor:
         # 跳过 log stream 启动输出
         time.sleep(3)
 
-        # HID 活动监听（只用键盘/鼠标事件，不再监听 powerd wake 误报）
+        # 持续监听 HID 活动（自动重连 log stream）
+        while self._running:
+            try:
+                self._listen_hid()
+            except Exception as e:
+                log(f"⚠️ HID 监听异常: {e}")
+                import traceback
+                log(traceback.format_exc())
+            log("🔄 HID 监听断开，5 秒后重连...")
+            for _ in range(5):
+                if not self._running:
+                    break
+                time.sleep(1)
+        watcher.stop()
+        log("👋 monitor stopped")
+
+    def _listen_hid(self):
+        """启动一次 log stream 监听（非 GUI session 下约 20-30 秒断开，自动重连）"""
         predicate = '(process == "powerd" AND eventMessage contains[c] "hidActive:1")'
 
         proc = subprocess.Popen(
             ["log", "stream", "--predicate", predicate, "--style", "compact", "--info"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=0,  # unbuffered
         )
         log("👂 HID 活动监听已启动")
 
-        try:
-            for line in proc.stdout:
-                line = line.strip()
-                if not line or line.startswith("Filtering") or line.startswith("log"):
-                    continue
+        if not proc.stdout:
+            log("⚠️ HID 监听无法启动（stdout 为空）")
+            return
+        if not proc.stdout.readable():
+            log("⚠️ HID 监听无法启动（stdout 不可读）")
+            return
 
-                now = time.time()
-                if "hidActive:1" in line:
-                    if now - self.last_hid_time >= COOLDOWN_HID:
+        # 用 os.read 非阻塞轮询，每次最多 45 秒
+        import os as _os
+        import fcntl as _fcntl
+        fd = proc.stdout.fileno()
+        # 设置为非阻塞模式
+        old_flags = _fcntl.fcntl(fd, _fcntl.F_GETFL)
+        _fcntl.fcntl(fd, _fcntl.F_SETFL, old_flags | _os.O_NONBLOCK)
+        deadline = time.time() + 45
+
+        while time.time() < deadline and self._running:
+            try:
+                data = _os.read(fd, 4096)
+                if not data:
+                    break
+                for line in data.decode('utf-8', errors='replace').split('\n'):
+                    line = line.strip()
+                    if not line or line.startswith("Filtering") or line.startswith("log"):
+                        continue
+                    now = time.time()
+                    if "hidActive:1" in line and now - self.last_hid_time >= COOLDOWN_HID:
                         self.last_hid_time = now
                         log("🔍 检测到键盘/鼠标活动")
                         take_photo("有人碰电脑")
-
-        except KeyboardInterrupt:
-            log("🛑 用户中断")
-        except Exception as e:
-            log(f"❌ 监控异常: {e}")
-        finally:
-            watcher.stop()
+            except BlockingIOError:
+                # 没有数据可读，等 1 秒再试
+                time.sleep(1)
+                continue
+            except Exception as e:
+                log(f"⚠️ HID 读取异常: {e}")
+                break
 
 
 # ========== 登录项管理（替代 LaunchAgent，摄像头权限正常） ==========
