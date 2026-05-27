@@ -221,7 +221,8 @@ class DisplayWatcher:
         self.on_wake_cb = on_wake_cb
         self.last_state = None
         self._running = True
-        self._unlock_listener_started = False
+        self.screen_locked = False  # 当前屏幕是否锁屏
+        self.last_hid_idle = None   # 锁屏后记录 HIDIdleTime
 
     def start(self):
         t = threading.Thread(target=self._poll, daemon=True)
@@ -231,21 +232,37 @@ class DisplayWatcher:
         self._running = False
 
     def _poll(self):
-        # 通道 1：pmset 轮询
+        # 初始检测
         self.last_state = self._check_pmset()
+        self.screen_locked = self._check_screen_locked()
+        if self.screen_locked:
+            log("🔒 启动时检测到屏幕已锁屏")
         time.sleep(1)
-
-        # 通道 2：log stream 监听解锁事件（后台线程）
-        unlock_thread = threading.Thread(target=self._listen_unlock, daemon=True)
-        unlock_thread.start()
-
-        # 通道 3：HIDIdleTime 轮询（检测锁屏下的键盘/鼠标活动）
-        self.last_hid_idle = self._get_hid_idle_time()
-        hid_check_interval = 2  # 每 2 秒检查一次
 
         while self._running:
             try:
-                # 通道 1：pmset 检测
+                new_screen_locked = self._check_screen_locked()
+
+                # 屏幕锁状态变化：解锁 → 拍照
+                if self.screen_locked and not new_screen_locked:
+                    log("🔍 检测到屏幕解锁")
+                    self.on_wake_cb()
+                    self.last_hid_idle = None  # 清空锁屏 HID 记录
+                elif not self.screen_locked and new_screen_locked:
+                    log("🔒 屏幕已锁屏，开始监控键盘/鼠标活动")
+                    self.last_hid_idle = self._get_hid_idle_time()
+                self.screen_locked = new_screen_locked
+
+                # 锁屏状态下：检测 HIDIdleTime 重置（有人动键盘/鼠标）
+                if self.screen_locked:
+                    current_idle = self._get_hid_idle_time()
+                    if current_idle is not None and self.last_hid_idle is not None:
+                        if current_idle < self.last_hid_idle - 1_000_000_000:
+                            log("🔍 锁屏下检测到键盘/鼠标活动")
+                            self.on_wake_cb()
+                    self.last_hid_idle = current_idle if current_idle is not None else self.last_hid_idle
+
+                # 通道：pmset 检测（显示休眠→唤醒）
                 new_state = self._check_pmset()
                 if new_state is not None and self.last_state is not None:
                     if self.last_state == 0 and new_state == 1:
@@ -253,19 +270,18 @@ class DisplayWatcher:
                         self.on_wake_cb()
                 self.last_state = new_state if new_state is not None else self.last_state
 
-                # 通道 3：HIDIdleTime 轮询（仅当电脑空闲超过 30 秒后才触发，避免活跃使用时拍照）
-                current_idle = self._get_hid_idle_time()
-                if current_idle is not None and self.last_hid_idle is not None:
-                    # HIDIdleTime 重置 → 有人动了键盘/鼠标
-                    # 仅当之前空闲超过 90 秒才触发（排除正常阅读/思考停顿）
-                    if current_idle < self.last_hid_idle - 500_000_000 and self.last_hid_idle > 90_000_000_000:
-                        log("🔍 检测到键盘/鼠标活动（电脑恢复使用）")
-                        self.on_wake_cb()
-                self.last_hid_idle = current_idle if current_idle is not None else self.last_hid_idle
-
             except Exception as e:
-                log(f"⚠️ 显示状态检测异常: {e}")
-            time.sleep(hid_check_interval)
+                log(f"⚠️ 检测异常: {e}")
+            time.sleep(2)
+
+    def _check_screen_locked(self) -> bool:
+        """通过 CGSSessionScreenIsLocked 检测屏幕是否锁屏"""
+        try:
+            import Quartz
+            d = Quartz.CGSessionCopyCurrentDictionary()
+            return d.get('CGSSessionScreenIsLocked', False) == 1
+        except Exception:
+            return False
 
     def _listen_unlock(self):
         """通道 2：log stream 监听 loginwindow 解锁事件"""
