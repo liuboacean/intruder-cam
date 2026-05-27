@@ -3,9 +3,7 @@
 import os, sys, subprocess, time
 
 PID_FILE = os.path.expanduser("~/Library/Logs/intruder_cam.pid")
-LOG_FILE = os.path.expanduser("~/Library/Logs/intruder_cam.log")
 SCRIPT = os.path.expanduser("~/intruder-cam/intruder_cam.py")
-VENV_PYTHON = os.path.expanduser("~/.hermes/hermes-agent/venv/bin/python3")
 
 def is_running():
     """Check if process is running via PID file + kill -0."""
@@ -35,7 +33,7 @@ def start():
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ulimit NOFILE raised: {soft} → {new_soft}")
     except Exception as e:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: couldn't raise ulimit: {e}")
-    python = VENV_PYTHON if os.path.exists(VENV_PYTHON) else sys.executable
+    python = sys.executable
     proc = subprocess.Popen(
         [python, SCRIPT],
         stdout=subprocess.DEVNULL,
