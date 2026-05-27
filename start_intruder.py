@@ -38,8 +38,8 @@ def start():
     python = VENV_PYTHON if os.path.exists(VENV_PYTHON) else sys.executable
     proc = subprocess.Popen(
         [python, SCRIPT],
-        stdout=open(LOG_FILE, "a"),
-        stderr=subprocess.STDOUT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )

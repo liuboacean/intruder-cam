@@ -256,6 +256,7 @@ class DisplayWatcher:
     def _listen_unlock(self):
         """通道 2：log stream 监听 loginwindow 解锁事件"""
         time.sleep(3)
+        startup_time = time.time()  # 启动后 10 秒内忽略历史事件
         while self._running:
             try:
                 proc = subprocess.Popen(
@@ -280,8 +281,16 @@ class DisplayWatcher:
                         data = _os.read(fd, 4096)
                         if not data:
                             break
+                        now = time.time()
+                        # 跳过启动期的历史事件
+                        if now - startup_time < 10:
+                            continue
+                        # 检查冷却
+                        if now - self.last_wake_time < COOLDOWN_WAKE:
+                            continue
+                        self.last_wake_time = now
                         log("🔍 检测到屏幕解锁事件")
-                        self.on_wake_cb()
+                        take_photo("屏幕解锁")
                     except BlockingIOError:
                         time.sleep(1)
                         continue
@@ -366,25 +375,8 @@ class IntruderMonitor:
         log("👋 monitor stopped")
 
     def _check_recent_display_wake(self):
-        """备用检测：用 log show 检查最近是否有显示器唤醒事件"""
-        try:
-            result = subprocess.run(
-                ["log", "show", "--last", "30s", "--predicate",
-                 '(process == "WindowServer" AND eventMessage contains[c] "display")',
-                 "--style", "compact"],
-                capture_output=True, text=True, timeout=5,
-            )
-            # 如果最近 30 秒内有 display 相关事件，且冷却够了，拍照
-            lines = [l for l in result.stdout.splitlines()
-                     if l.strip() and not l.startswith("Filtering")]
-            if lines:
-                now = time.time()
-                if now - self.last_hid_time >= COOLDOWN_HID:
-                    self.last_hid_time = now
-                    log(f"🔍 检测到近期显示活动 ({len(lines)} 条事件)")
-                    take_photo("显示活动检测")
-        except Exception:
-            pass
+        """备用检测已禁用 — WindowServer display 事件太频繁，误报严重"""
+        pass
 
     def _listen_hid(self):
         """启动一次 log stream 监听（非 GUI session 下约 20-30 秒断开，自动重连）"""
