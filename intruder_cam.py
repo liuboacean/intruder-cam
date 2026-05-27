@@ -243,17 +243,17 @@ class DisplayWatcher:
             try:
                 new_screen_locked = self._check_screen_locked()
 
-                # 屏幕锁状态变化：解锁 → 拍照
+                # 屏幕锁状态变化
                 if self.screen_locked and not new_screen_locked:
                     log("🔍 检测到屏幕解锁")
                     self.on_wake_cb()
-                    self.last_hid_idle = None  # 清空锁屏 HID 记录
+                    self.last_hid_idle = None
                 elif not self.screen_locked and new_screen_locked:
                     log("🔒 屏幕已锁屏，开始监控键盘/鼠标活动")
                     self.last_hid_idle = self._get_hid_idle_time()
                 self.screen_locked = new_screen_locked
 
-                # 锁屏状态下：检测 HIDIdleTime 重置（有人动键盘/鼠标）
+                # 锁屏状态下：检测 HIDIdleTime 重置
                 if self.screen_locked:
                     current_idle = self._get_hid_idle_time()
                     if current_idle is not None and self.last_hid_idle is not None:
