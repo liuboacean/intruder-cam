@@ -1,48 +1,61 @@
 #!/usr/bin/env python3
-"""启动 IntruderCam — 先彻底杀光旧进程，再启动新实例"""
-import subprocess, os, sys, time, signal
+"""IntruderCam startup script - checks PID file, starts if not running."""
+import os, sys, subprocess, time
 
-PIDFILE = os.path.expanduser('~/Library/Logs/intruder_cam.pid')
-SCRIPT = os.path.expanduser('~/intruder-cam/intruder_cam.py')
+PID_FILE = os.path.expanduser("~/Library/Logs/intruder_cam.pid")
+LOG_FILE = os.path.expanduser("~/Library/Logs/intruder_cam.log")
+SCRIPT = os.path.expanduser("~/intruder-cam/intruder_cam.py")
+VENV_PYTHON = os.path.expanduser("~/.hermes/hermes-agent/venv/bin/python3")
 
-# Step 1: 杀光所有 intruder_cam.py 进程
-subprocess.run(
-    ['pkill', '-9', '-f', 'intruder_cam\\.py'],
-    capture_output=True, timeout=5,
-)
-subprocess.run(
-    ['pkill', '-9', '-f', 'ffmpeg.*avfoundation'],
-    capture_output=True, timeout=5,
-)
-time.sleep(2)  # 等进程彻底退出
+def is_running():
+    """Check if process is running via PID file + kill -0."""
+    if not os.path.exists(PID_FILE):
+        return False
+    with open(PID_FILE) as f:
+        pid_str = f.read().strip()
+    if not pid_str.isdigit():
+        return False
+    pid = int(pid_str)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
-# Step 2: 清除旧锁/PID
-for f in ['intruder_cam.pid', 'intruder_cam.lock']:
-    p = os.path.expanduser(f'~/Library/Logs/{f}')
-    if os.path.exists(p):
-        os.remove(p)
+def start():
+    """Launch IntruderCam in background."""
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] IntruderCam not running. Starting...")
+    # Raise file descriptor limit — IntruderCam uses many sockets/FDs
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        new_soft = min(2048, hard if hard > 0 else 2048)
+        if soft < new_soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ulimit NOFILE raised: {soft} → {new_soft}")
+    except Exception as e:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: couldn't raise ulimit: {e}")
+    python = VENV_PYTHON if os.path.exists(VENV_PYTHON) else sys.executable
+    proc = subprocess.Popen(
+        [python, SCRIPT],
+        stdout=open(LOG_FILE, "a"),
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    with open(PID_FILE, "w") as f:
+        f.write(str(proc.pid))
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Started PID {proc.pid}")
+    return proc.pid
 
-# Step 3: 启动（完全独立进程组）
-proc = subprocess.Popen(
-    [sys.executable, '-u', SCRIPT],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    start_new_session=True,
-    close_fds=True,
-)
-
-child_pid = proc.pid
-with open(PIDFILE, 'w') as f:
-    f.write(str(child_pid))
-
-# 确认存活
-time.sleep(6)
-try:
-    os.kill(child_pid, 0)
-    print(f"✅ IntruderCam 启动成功 (PID: {child_pid})")
-    print(f"📁 照片: ~/Pictures/IntruderCam/")
-except OSError:
-    print(f"❌ 启动失败 (PID {child_pid} died)")
-    if os.path.exists(os.path.expanduser('~/Library/Logs/intruder_cam.log')):
-        with open(os.path.expanduser('~/Library/Logs/intruder_cam.log')) as f:
-            print(f.read()[-500:])
+if __name__ == "__main__":
+    if is_running():
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] IntruderCam already running.")
+        sys.exit(0)
+    pid = start()
+    time.sleep(2)
+    if is_running():
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Confirmed running on PID {pid}")
+    else:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ERROR: Process failed to start!")
+        sys.exit(1)

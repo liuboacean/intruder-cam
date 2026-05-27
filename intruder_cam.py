@@ -29,6 +29,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # ========== 配置 ==========
 PHOTO_DIR = Path.home() / "Pictures" / "IntruderCam"
@@ -37,8 +38,8 @@ LOG_FILE = Path.home() / "Library" / "Logs" / "intruder_cam.log"
 LOCK_FILE = Path.home() / "Library" / "Logs" / "intruder_cam.lock"
 
 # 冷却时间
-COOLDOWN_WAKE = 20    # 显示器唤醒后 20 秒内不再重复拍
-COOLDOWN_HID = 15     # 键盘/鼠标事件后 15 秒内不再重复拍
+COOLDOWN_WAKE = 60    # 显示器唤醒后 60 秒内不再重复拍
+COOLDOWN_HID = 30     # 键盘/鼠标事件后 30 秒内不再重复拍
 
 # ========== 日志 ==========
 
@@ -91,16 +92,23 @@ _photos_album_ready = False
 
 
 def ensure_photos_album():
-    """确保 IntruderCam 相簿存在"""
+    """确保 IntruderCam 相簿存在（不重复创建）"""
     global _photos_album_ready
     if _photos_album_ready:
         return True
     try:
-        subprocess.run(
+        # 先检查是否已有同名相簿
+        check = subprocess.run(
             ["osascript", "-e",
-             f'tell application "Photos" to make new album named "{PHOTOS_ALBUM}"'],
-            capture_output=True, timeout=10,
+             f'tell application "Photos" to get name of every album'],
+            capture_output=True, text=True, timeout=10,
         )
+        if PHOTOS_ALBUM not in check.stdout:
+            subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "Photos" to make new album named "{PHOTOS_ALBUM}"'],
+                capture_output=True, timeout=10,
+            )
     except Exception:
         pass
     _photos_album_ready = True
@@ -143,7 +151,7 @@ def import_to_photos(filepath: str) -> bool:
         return False
 
 
-def take_photo(reason: str) -> str | None:
+def take_photo(reason: str) -> Optional[str]:
     """拍照，返回文件路径"""
     # 先拿锁，拿不到说明另一个拍照正在进行，跳过
     with PhotoLock() as lock:
@@ -203,18 +211,17 @@ def take_photo(reason: str) -> str | None:
 # ========== 核心监控 ==========
 
 class DisplayWatcher:
-    """轮询 pmset -g assertions 检测显示器状态变化
+    """双通道检测显示器状态：
 
-    InternalPreventDisplaySleep:
-      1 = 显示器亮着（有人在使用）
-      0 = 显示器可以休眠（合盖/超时）
-    检测 0→1 转变 = 显示器唤醒事件
+    通道 1: pmset -g assertions 检测 InternalPreventDisplaySleep 0→1（显示休眠→唤醒）
+    通道 2: log stream 监听 loginwindow 认证事件（屏幕解锁）
     """
 
     def __init__(self, on_wake_cb):
         self.on_wake_cb = on_wake_cb
         self.last_state = None
         self._running = True
+        self._unlock_listener_started = False
 
     def start(self):
         t = threading.Thread(target=self._poll, daemon=True)
@@ -224,15 +231,19 @@ class DisplayWatcher:
         self._running = False
 
     def _poll(self):
-        # 先获取初始状态
-        self.last_state = self._check_state()
+        # 通道 1：pmset 轮询
+        self.last_state = self._check_pmset()
         time.sleep(1)
+
+        # 通道 2：log stream 监听解锁事件（后台线程）
+        unlock_thread = threading.Thread(target=self._listen_unlock, daemon=True)
+        unlock_thread.start()
 
         while self._running:
             try:
-                new_state = self._check_state()
+                new_state = self._check_pmset()
                 if new_state is not None and self.last_state is not None:
-                    # 0 → 1：显示器刚刚唤醒（合盖开/按键唤醒）
+                    # 0 → 1：显示器从休眠唤醒
                     if self.last_state == 0 and new_state == 1:
                         log("🔍 显示器唤醒（显示状态从休眠转为亮起）")
                         self.on_wake_cb()
@@ -240,10 +251,46 @@ class DisplayWatcher:
                 self.last_state = new_state if new_state is not None else self.last_state
             except Exception as e:
                 log(f"⚠️ 显示状态检测异常: {e}")
-
             time.sleep(2)
 
-    def _check_state(self) -> int | None:
+    def _listen_unlock(self):
+        """通道 2：log stream 监听 loginwindow 解锁事件"""
+        time.sleep(3)
+        while self._running:
+            try:
+                proc = subprocess.Popen(
+                    ["log", "stream", "--predicate",
+                     '(process == "loginwindow" AND eventMessage contains[c] "authentication")',
+                     "--style", "compact", "--info"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, bufsize=0,
+                )
+                if proc.stdout is None:
+                    time.sleep(10)
+                    continue
+
+                import os as _os, fcntl as _fcntl
+                fd = proc.stdout.fileno()
+                old = _fcntl.fcntl(fd, _fcntl.F_GETFL)
+                _fcntl.fcntl(fd, _fcntl.F_SETFL, old | _os.O_NONBLOCK)
+
+                deadline = time.time() + 60
+                while time.time() < deadline and self._running:
+                    try:
+                        data = _os.read(fd, 4096)
+                        if not data:
+                            break
+                        log("🔍 检测到屏幕解锁事件")
+                        self.on_wake_cb()
+                    except BlockingIOError:
+                        time.sleep(1)
+                        continue
+                proc.stdout.close()
+                proc.wait(timeout=3)
+            except Exception:
+                time.sleep(5)
+
+    def _check_pmset(self) -> Optional[int]:
         """检查 InternalPreventDisplaySleep 状态"""
         try:
             result = subprocess.run(
@@ -280,8 +327,8 @@ class IntruderMonitor:
         log(f"⏱  冷却: 唤醒{COOLDOWN_WAKE}s / 键盘{COOLDOWN_HID}s")
         log("=" * 50)
 
-        # 启动测试照
-        take_photo("启动测试")
+        # 启动测试照（已禁用：KeepAlive 频繁重启导致大量无意义拍照）
+        # take_photo("启动测试")
 
         # 启动显示器状态轮询（每 2 秒检测）
         watcher = DisplayWatcher(on_wake_cb=self.on_display_wake)
@@ -292,7 +339,12 @@ class IntruderMonitor:
         time.sleep(3)
 
         # 持续监听 HID 活动（自动重连 log stream）
+        # 每 30 秒额外用 ioreg 检查一次显示器状态，弥补 log stream 收不到 HID 事件的问题
+        last_periodic_check = 0.0
+        periodic_interval = 30
+
         while self._running:
+            # 主 HID 监听
             try:
                 self._listen_hid()
             except Exception as e:
@@ -300,12 +352,39 @@ class IntruderMonitor:
                 import traceback
                 log(traceback.format_exc())
             log("🔄 HID 监听断开，5 秒后重连...")
+
+            # 等待期间也做周期性检查
             for _ in range(5):
                 if not self._running:
                     break
+                now = time.time()
+                if now - last_periodic_check >= periodic_interval:
+                    last_periodic_check = now
+                    self._check_recent_display_wake()
                 time.sleep(1)
         watcher.stop()
         log("👋 monitor stopped")
+
+    def _check_recent_display_wake(self):
+        """备用检测：用 log show 检查最近是否有显示器唤醒事件"""
+        try:
+            result = subprocess.run(
+                ["log", "show", "--last", "30s", "--predicate",
+                 '(process == "WindowServer" AND eventMessage contains[c] "display")',
+                 "--style", "compact"],
+                capture_output=True, text=True, timeout=5,
+            )
+            # 如果最近 30 秒内有 display 相关事件，且冷却够了，拍照
+            lines = [l for l in result.stdout.splitlines()
+                     if l.strip() and not l.startswith("Filtering")]
+            if lines:
+                now = time.time()
+                if now - self.last_hid_time >= COOLDOWN_HID:
+                    self.last_hid_time = now
+                    log(f"🔍 检测到近期显示活动 ({len(lines)} 条事件)")
+                    take_photo("显示活动检测")
+        except Exception:
+            pass
 
     def _listen_hid(self):
         """启动一次 log stream 监听（非 GUI session 下约 20-30 秒断开，自动重连）"""
@@ -318,11 +397,12 @@ class IntruderMonitor:
         )
         log("👂 HID 活动监听已启动")
 
-        if not proc.stdout:
+        if proc.stdout is None:
             log("⚠️ HID 监听无法启动（stdout 为空）")
             return
         if not proc.stdout.readable():
             log("⚠️ HID 监听无法启动（stdout 不可读）")
+            proc.stdout.close()
             return
 
         # 用 os.read 非阻塞轮询，每次最多 45 秒
@@ -334,27 +414,32 @@ class IntruderMonitor:
         _fcntl.fcntl(fd, _fcntl.F_SETFL, old_flags | _os.O_NONBLOCK)
         deadline = time.time() + 45
 
-        while time.time() < deadline and self._running:
-            try:
-                data = _os.read(fd, 4096)
-                if not data:
+        try:
+            while time.time() < deadline and self._running:
+                try:
+                    data = _os.read(fd, 4096)
+                    if not data:
+                        break
+                    for line in data.decode('utf-8', errors='replace').split('\n'):
+                        line = line.strip()
+                        if not line or line.startswith("Filtering") or line.startswith("log"):
+                            continue
+                        now = time.time()
+                        if "hidActive:1" in line and now - self.last_hid_time >= COOLDOWN_HID:
+                            self.last_hid_time = now
+                            log("🔍 检测到键盘/鼠标活动")
+                            take_photo("有人碰电脑")
+                except BlockingIOError:
+                    # 没有数据可读，等 1 秒再试
+                    time.sleep(1)
+                    continue
+                except Exception as e:
+                    log(f"⚠️ HID 读取异常: {e}")
                     break
-                for line in data.decode('utf-8', errors='replace').split('\n'):
-                    line = line.strip()
-                    if not line or line.startswith("Filtering") or line.startswith("log"):
-                        continue
-                    now = time.time()
-                    if "hidActive:1" in line and now - self.last_hid_time >= COOLDOWN_HID:
-                        self.last_hid_time = now
-                        log("🔍 检测到键盘/鼠标活动")
-                        take_photo("有人碰电脑")
-            except BlockingIOError:
-                # 没有数据可读，等 1 秒再试
-                time.sleep(1)
-                continue
-            except Exception as e:
-                log(f"⚠️ HID 读取异常: {e}")
-                break
+        finally:
+            # 关键修复：确保 pipe 被关闭，防止 FD 泄漏
+            proc.stdout.close()
+            proc.wait(timeout=5)
 
 
 # ========== 登录项管理（替代 LaunchAgent，摄像头权限正常） ==========
