@@ -1,6 +1,6 @@
-.../hermes_cli/assets/hermes_pet_macos.swift       |  51 +++++++++
+.../hermes_cli/assets/hermes_pet_macos.swift       |  43 ++++++++
  hermes-pet-macos/hermes_cli/pet_overlay.py         | 116 +++++++++++++++++++++
- 2 files changed, 167 insertions(+)
+ 2 files changed, 159 insertions(+)
 
 --- Changes ---
 
@@ -10,36 +10,32 @@ hermes-pet-macos/hermes_cli/assets/hermes_pet_macos.swift
    }
    
    struct PetState: Decodable {
-  @@ -141,6 +142,8 @@ final class PetOverlayView: NSView {
+  @@ -140,6 +141,7 @@ final class PetOverlayView: NSView {
   +    private var intrudercamRunning = false
-  +    private var uiLanguage = "en"
+       private let supportedLanguages = ["ko", "en", "ja", "zh"]
        private var terminalOptions: [PetTerminalOption] = [
            PetTerminalOption(id: "macos", label: "macOS Terminal", available: true, reason: nil)
-       ]
-  @@ -197,6 +200,7 @@ final class PetOverlayView: NSView {
+  @@ -195,6 +197,7 @@ final class PetOverlayView: NSView {
   +        self.intrudercamRunning = snapshot.intrudercam_running ?? false
+               self.uiLanguage = language
+           }
            if let preferences = snapshot.preferences {
-               if let language = preferences.language, supportedLanguages.contains(language) {
-                   self.uiLanguage = language
-  @@ -452,6 +456,8 @@ final class PetOverlayView: NSView {
+  @@ -452,6 +455,8 @@ final class PetOverlayView: NSView {
   +        menu.addItem(NSMenuItem.separator())
   +        addIntruderCamMenu(to: menu)
            addRuntimeMenu(to: menu)
            menu.addItem(NSMenuItem.separator())
            addNotificationMenuItem(to: menu)
-  @@ -701,6 +707,29 @@ final class PetOverlayView: NSView {
+  @@ -701,6 +706,44 @@ final class PetOverlayView: NSView {
+  +
   +    private func addIntruderCamMenu(to menu: NSMenu) {
   +        let root = NSMenuItem(title: "IntruderCam", action: nil, keyEquivalent: "")
   +        let submenu = NSMenu()
-  +
-  +        // 状态标题行
   +        let statusText = intrudercamRunning ? "🟢 运行中" : "⚪ 未运行"
   +        let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
   +        statusItem.isEnabled = false
   +        submenu.addItem(statusItem)
   +        submenu.addItem(NSMenuItem.separator())
-  +
-  +        // 启动/停止动态按钮
   +        if intrudercamRunning {
   +            addMenuItem(submenu, title: "■ Stop", action: #selector(intruderCamStop))
   +        } else {
@@ -51,10 +47,6 @@ hermes-pet-macos/hermes_cli/assets/hermes_pet_macos.swift
   +        menu.addItem(root)
   +    }
   +
-       private func totalNotificationCount() -> Int {
-           pets.reduce(0) { total, pet in
-               total + max(pet.notification_count ?? 0, 0)
-  @@ -775,6 +804,24 @@ final class PetOverlayView: NSView {
   +    // MARK: - IntruderCam
   +
   +    @objc private func intruderCamStart() {
@@ -73,18 +65,10 @@ hermes-pet-macos/hermes_cli/assets/hermes_pet_macos.swift
   +        emitAction("intrudercam_photos")
   +    }
   +
-       private func neoColor(_ hex: UInt32, alpha: CGFloat = 1.0) -> NSColor {
-           let red = CGFloat((hex >> 16) & 0xff) / 255.0
-           let green = CGFloat((hex >> 8) & 0xff) / 255.0
-  @@ -1634,6 +1681,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
-  +        // macOS 26.5+ requires explicit activation to bring the floating panel
-  +        // above other windows when the app has .accessory activation policy.
-  +        NSApp.activate(ignoringOtherApps: true)
-  +
-           self.panel = panel
-           self.petView = view
-   
-  +51 -0
+       private func totalNotificationCount() -> Int {
+           pets.reduce(0) { total, pet in
+               total + max(pet.notification_count ?? 0, 0)
+  +43 -0
 
 hermes-pet-macos/hermes_cli/pet_overlay.py
   @@ -1182,6 +1182,18 @@ def _connected_pet_modes(sessions: Optional[list[dict[str, Any]]] = None) -> lis
@@ -197,7 +181,7 @@ hermes-pet-macos/hermes_cli/pet_overlay.py
   +                pets,
   +                PetEvent(
   +                    source_id=LOCAL_SOURCE_ID, label=label,
-  +                    state="review", message=f"已打开照片目录",
+  +                    state="review", message="已打开照片目录",
   +                    animation="review", pet_action="done", emotion="done",
   +                    ttl_ms=3_000,
   +                ),
