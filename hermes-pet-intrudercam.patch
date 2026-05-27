@@ -1,0 +1,214 @@
+.../hermes_cli/assets/hermes_pet_macos.swift       |  51 +++++++++
+ hermes-pet-macos/hermes_cli/pet_overlay.py         | 116 +++++++++++++++++++++
+ 2 files changed, 167 insertions(+)
+
+--- Changes ---
+
+hermes-pet-macos/hermes_cli/assets/hermes_pet_macos.swift
+  @@ -11,6 +11,7 @@ struct PetSnapshot: Decodable {
+  +    let intrudercam_running: Bool?
+   }
+   
+   struct PetState: Decodable {
+  @@ -141,6 +142,8 @@ final class PetOverlayView: NSView {
+  +    private var intrudercamRunning = false
+  +    private var uiLanguage = "en"
+       private var terminalOptions: [PetTerminalOption] = [
+           PetTerminalOption(id: "macos", label: "macOS Terminal", available: true, reason: nil)
+       ]
+  @@ -197,6 +200,7 @@ final class PetOverlayView: NSView {
+  +        self.intrudercamRunning = snapshot.intrudercam_running ?? false
+           if let preferences = snapshot.preferences {
+               if let language = preferences.language, supportedLanguages.contains(language) {
+                   self.uiLanguage = language
+  @@ -452,6 +456,8 @@ final class PetOverlayView: NSView {
+  +        menu.addItem(NSMenuItem.separator())
+  +        addIntruderCamMenu(to: menu)
+           addRuntimeMenu(to: menu)
+           menu.addItem(NSMenuItem.separator())
+           addNotificationMenuItem(to: menu)
+  @@ -701,6 +707,29 @@ final class PetOverlayView: NSView {
+  +    private func addIntruderCamMenu(to menu: NSMenu) {
+  +        let root = NSMenuItem(title: "IntruderCam", action: nil, keyEquivalent: "")
+  +        let submenu = NSMenu()
+  +
+  +        // 状态标题行
+  +        let statusText = intrudercamRunning ? "🟢 运行中" : "⚪ 未运行"
+  +        let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+  +        statusItem.isEnabled = false
+  +        submenu.addItem(statusItem)
+  +        submenu.addItem(NSMenuItem.separator())
+  +
+  +        // 启动/停止动态按钮
+  +        if intrudercamRunning {
+  +            addMenuItem(submenu, title: "■ Stop", action: #selector(intruderCamStop))
+  +        } else {
+  +            addMenuItem(submenu, title: "▶ Start", action: #selector(intruderCamStart))
+  +        }
+  +        submenu.addItem(NSMenuItem.separator())
+  +        addMenuItem(submenu, title: "📂 Open Photos", action: #selector(intruderCamOpenPhotos))
+  +        menu.setSubmenu(submenu, for: root)
+  +        menu.addItem(root)
+  +    }
+  +
+       private func totalNotificationCount() -> Int {
+           pets.reduce(0) { total, pet in
+               total + max(pet.notification_count ?? 0, 0)
+  @@ -775,6 +804,24 @@ final class PetOverlayView: NSView {
+  +    // MARK: - IntruderCam
+  +
+  +    @objc private func intruderCamStart() {
+  +        emitAction("intrudercam_start")
+  +    }
+  +
+  +    @objc private func intruderCamStop() {
+  +        emitAction("intrudercam_stop")
+  +    }
+  +
+  +    @objc private func intruderCamStatus() {
+  +        emitAction("intrudercam_status")
+  +    }
+  +
+  +    @objc private func intruderCamOpenPhotos() {
+  +        emitAction("intrudercam_photos")
+  +    }
+  +
+       private func neoColor(_ hex: UInt32, alpha: CGFloat = 1.0) -> NSColor {
+           let red = CGFloat((hex >> 16) & 0xff) / 255.0
+           let green = CGFloat((hex >> 8) & 0xff) / 255.0
+  @@ -1634,6 +1681,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
+  +        // macOS 26.5+ requires explicit activation to bring the floating panel
+  +        // above other windows when the app has .accessory activation policy.
+  +        NSApp.activate(ignoringOtherApps: true)
+  +
+           self.panel = panel
+           self.petView = view
+   
+  +51 -0
+
+hermes-pet-macos/hermes_cli/pet_overlay.py
+  @@ -1182,6 +1182,18 @@ def _connected_pet_modes(sessions: Optional[list[dict[str, Any]]] = None) -> lis
+  +def _intrudercam_is_running() -> bool:
+  +    pid_file = Path.home() / "Library/Logs/intruder_cam.pid"
+  +    if not pid_file.exists():
+  +        return False
+  +    try:
+  +        pid = int(pid_file.read_text().strip())
+  +        os.kill(pid, 0)
+  +        return True
+  +    except (OSError, ValueError):
+  +        return False
+  +
+  +
+   def _pet_preferences_payload() -> dict[str, Any]:
+       prefs = read_pet_preferences()
+       return {
+  @@ -1247,6 +1259,7 @@ def _snapshot_payload(
+  +            "intrudercam_running": _intrudercam_is_running(),
+           },
+           ensure_ascii=False,
+           separators=(",", ":"),
+  @@ -2362,6 +2375,109 @@ def _handle_macos_helper_action(
+  +    elif action == "intrudercam_start":
+  +        try:
+  +            script = Path.home() / "intruder-cam" / "start_intruder.py"
+  +            subprocess.Popen(
+  +                [sys.executable, str(script)],
+  +                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+  +                start_new_session=True,
+  +            )
+  +            return _apply_pet_event(
+  +                pets,
+  +                PetEvent(
+  +                    source_id=LOCAL_SOURCE_ID, label=label,
+  +                    state="running", message="IntruderCam 已启动",
+  +                    animation="running", pet_action="done", emotion="done",
+  +                    ttl_ms=5_000,
+  +                    notification_count=1, notification_kind="done", notification_label="1",
+  +                ),
+  +            )
+  +        except Exception as exc:
+  +            return _apply_pet_event(
+  +                pets,
+  +                PetEvent(
+  +                    source_id=LOCAL_SOURCE_ID, label=label,
+  +                    state="failed", message=f"启动失败: {exc}",
+  +                    animation="failed", emotion="error", ttl_ms=8_000,
+  +                    notification_count=1, notification_kind="failed", notification_label="!",
+  +                ),
+  +            )
+  +    elif action == "intrudercam_stop":
+  +        try:
+  +            subprocess.run(["pkill", "-9", "-f", r"intruder_cam\.py"],
+  +                           capture_output=True, timeout=5)
+  +            Path.home().joinpath("Library/Logs/intruder_cam.pid").unlink(missing_ok=True)
+  +            return _apply_pet_event(
+  +                pets,
+  +                PetEvent(
+  +                    source_id=LOCAL_SOURCE_ID, label=label,
+  +                    state="idle", message="IntruderCam 已停止",
+  +                    animation="idle", pet_action="done", emotion="done",
+  +                    ttl_ms=5_000,
+  +                    notification_count=1, notification_kind="done", notification_label="1",
+  +                ),
+  +            )
+  +        except Exception as exc:
+  +            return _apply_pet_event(
+  +                pets,
+  +                PetEvent(
+  +                    source_id=LOCAL_SOURCE_ID, label=label,
+  +                    state="failed", message=f"停止失败: {exc}",
+  +                    animation="failed", emotion="error", ttl_ms=8_000,
+  +                    notification_count=1, notification_kind="failed", notification_label="!",
+  +                ),
+  +            )
+  +    elif action == "intrudercam_status":
+  +        pid_file = Path.home() / "Library/Logs/intruder_cam.pid"
+  +        running = False
+  +        pid = None
+  +        if pid_file.exists():
+  +            try:
+  +                pid = int(pid_file.read_text().strip())
+  +                os.kill(pid, 0)
+  +                running = True
+  +            except (OSError, ValueError):
+  +                pass
+  +        if running:
+  +            message = f"运行中 (PID {pid})"
+  +            state = "running"
+  +        else:
+  +            message = "未运行"
+  +            state = "idle"
+  +        return _apply_pet_event(
+  +            pets,
+  +            PetEvent(
+  +                source_id=LOCAL_SOURCE_ID, label=label,
+  +                state=state, message=message,
+  +                animation="review", pet_action="done", emotion="done",
+  +                ttl_ms=5_000,
+  +                notification_count=1, notification_kind="done", notification_label="1",
+  +            ),
+  +        )
+  +    elif action == "intrudercam_photos":
+  +        try:
+  +            photo_dir = Path.home() / "Pictures" / "IntruderCam"
+  +            subprocess.run(["open", str(photo_dir)], capture_output=True, timeout=5)
+  +            return _apply_pet_event(
+  +                pets,
+  +                PetEvent(
+  +                    source_id=LOCAL_SOURCE_ID, label=label,
+  +                    state="review", message=f"已打开照片目录",
+  +                    animation="review", pet_action="done", emotion="done",
+  +                    ttl_ms=3_000,
+  +                ),
+  +            )
+  +        except Exception as exc:
+  +            return _apply_pet_event(
+  +                pets,
+  +                PetEvent(
+  +                    source_id=LOCAL_SOURCE_ID, label=label,
+  +                    state="failed", message=f"打开失败: {exc}",
+  +                    animation="failed", emotion="error", ttl_ms=5_000,
+  ... (3 lines truncated)
+  +116 -0
+[full diff: rtk git diff --no-compact]
