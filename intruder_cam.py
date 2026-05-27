@@ -253,12 +253,13 @@ class DisplayWatcher:
                         self.on_wake_cb()
                 self.last_state = new_state if new_state is not None else self.last_state
 
-                # 通道 3：HIDIdleTime 轮询
+                # 通道 3：HIDIdleTime 轮询（仅当电脑空闲超过 30 秒后才触发，避免活跃使用时拍照）
                 current_idle = self._get_hid_idle_time()
                 if current_idle is not None and self.last_hid_idle is not None:
-                    # HIDIdleTime 是单调递增的，如果新值比旧值小 → 计数器重置 → 有人动了键盘/鼠标
-                    if current_idle < self.last_hid_idle - 500_000_000:
-                        log("🔍 检测到键盘/鼠标活动（HIDIdleTime 重置）")
+                    # HIDIdleTime 重置 → 有人动了键盘/鼠标
+                    # 仅当之前空闲超过 30 秒才触发（排除活跃使用场景）
+                    if current_idle < self.last_hid_idle - 500_000_000 and self.last_hid_idle > 30_000_000_000:
+                        log("🔍 检测到键盘/鼠标活动（电脑恢复使用）")
                         self.on_wake_cb()
                 self.last_hid_idle = current_idle if current_idle is not None else self.last_hid_idle
 
