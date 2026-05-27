@@ -239,19 +239,32 @@ class DisplayWatcher:
         unlock_thread = threading.Thread(target=self._listen_unlock, daemon=True)
         unlock_thread.start()
 
+        # 通道 3：HIDIdleTime 轮询（检测锁屏下的键盘/鼠标活动）
+        self.last_hid_idle = self._get_hid_idle_time()
+        hid_check_interval = 2  # 每 2 秒检查一次
+
         while self._running:
             try:
+                # 通道 1：pmset 检测
                 new_state = self._check_pmset()
                 if new_state is not None and self.last_state is not None:
-                    # 0 → 1：显示器从休眠唤醒
                     if self.last_state == 0 and new_state == 1:
-                        log("🔍 显示器唤醒（显示状态从休眠转为亮起）")
+                        log("🔍 显示器唤醒（从休眠转为亮起）")
                         self.on_wake_cb()
-
                 self.last_state = new_state if new_state is not None else self.last_state
+
+                # 通道 3：HIDIdleTime 轮询
+                current_idle = self._get_hid_idle_time()
+                if current_idle is not None and self.last_hid_idle is not None:
+                    # HIDIdleTime 是单调递增的，如果新值比旧值小 → 计数器重置 → 有人动了键盘/鼠标
+                    if current_idle < self.last_hid_idle - 500_000_000:
+                        log("🔍 检测到键盘/鼠标活动（HIDIdleTime 重置）")
+                        self.on_wake_cb()
+                self.last_hid_idle = current_idle if current_idle is not None else self.last_hid_idle
+
             except Exception as e:
                 log(f"⚠️ 显示状态检测异常: {e}")
-            time.sleep(2)
+            time.sleep(hid_check_interval)
 
     def _listen_unlock(self):
         """通道 2：log stream 监听 loginwindow 解锁事件"""
@@ -315,6 +328,21 @@ class DisplayWatcher:
         except Exception:
             return None
 
+    def _get_hid_idle_time(self) -> Optional[int]:
+        """读取 HIDIdleTime（纳秒，自上次键盘/鼠标活动以来的时间）"""
+        try:
+            result = subprocess.run(
+                ["ioreg", "-c", "IOHIDSystem"],
+                capture_output=True, text=True, timeout=3,
+            )
+            for line in result.stdout.splitlines():
+                if "HIDIdleTime" in line:
+                    val = line.split("=")[-1].strip().strip('"')
+                    return int(val)
+            return None
+        except Exception:
+            return None
+
 
 class IntruderMonitor:
     def __init__(self):
@@ -348,10 +376,6 @@ class IntruderMonitor:
         time.sleep(3)
 
         # 持续监听 HID 活动（自动重连 log stream）
-        # 每 30 秒额外用 ioreg 检查一次显示器状态，弥补 log stream 收不到 HID 事件的问题
-        last_periodic_check = 0.0
-        periodic_interval = 30
-
         while self._running:
             # 主 HID 监听
             try:
@@ -361,15 +385,9 @@ class IntruderMonitor:
                 import traceback
                 log(traceback.format_exc())
             log("🔄 HID 监听断开，5 秒后重连...")
-
-            # 等待期间也做周期性检查
             for _ in range(5):
                 if not self._running:
                     break
-                now = time.time()
-                if now - last_periodic_check >= periodic_interval:
-                    last_periodic_check = now
-                    self._check_recent_display_wake()
                 time.sleep(1)
         watcher.stop()
         log("👋 monitor stopped")
